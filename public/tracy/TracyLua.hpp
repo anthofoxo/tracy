@@ -451,16 +451,29 @@ static inline void LuaRemove( char* script ) {}
 
 static inline void LuaHook( lua_State* L, lua_Debug* ar )
 {
-    if ( ar->event == LUA_HOOKCALL )
-    {
+    // Early return to avoid lua global lookup
+    if( ar->event != LUA_HOOKCALL && ar->event != LUA_HOOKRET ) return;
+    
+    constexpr const char* kGlobalFieldName = "_tracy_function_depth_counter";
+
 #ifdef TRACY_ON_DEMAND
-        const auto zoneCnt = GetLuaZoneState().counter++;
-        if ( zoneCnt != 0 && !GetLuaZoneState().active ) return;
-        GetLuaZoneState().active = GetProfiler().IsConnected();
-        if ( !GetLuaZoneState().active ) return;
+    // Fetch the depth counter, will be 0 if not set
+    lua_getglobal( L, kGlobalFieldName );
+    auto depthCounter = lua_tointeger( L, -1 );
+    lua_pop( L, 1 );
 #endif
+
+    if( ar->event == LUA_HOOKCALL )
+    {
         lua_getinfo( L, "Snl", ar );
 
+#ifdef TRACY_ON_DEMAND
+        // Increment and update depth counter
+        lua_pushinteger( L, depthCounter + 1 );
+        lua_setglobal( L, kGlobalFieldName );
+
+        if( !GetProfiler().IsConnected() ) return;
+#endif
         char src[256];
         detail::LuaShortenSrc( src, ar->short_src );
 
@@ -470,21 +483,24 @@ static inline void LuaHook( lua_State* L, lua_Debug* ar )
         MemWrite( &item->zoneBegin.srcloc, srcloc );
         TracyQueueCommit( zoneBeginThread );
     }
-    else if (ar->event == LUA_HOOKRET) {
+    else if( ar->event == LUA_HOOKRET )
+    {
 #ifdef TRACY_ON_DEMAND
-        assert( GetLuaZoneState().counter != 0 );
-        GetLuaZoneState().counter--;
-        if ( !GetLuaZoneState().active ) return;
-        if ( !GetProfiler().IsConnected() )
-        {
-            GetLuaZoneState().active = false;
-            return;
-        }
+        lua_pushinteger( L, depthCounter - 1 );
+        lua_setglobal( L, kGlobalFieldName );
+        if( !GetProfiler().IsConnected() ) return;
 #endif
         TracyQueuePrepare( QueueType::ZoneEnd );
         MemWrite( &item->zoneEnd.time, Profiler::GetTime() );
         TracyQueueCommit( zoneEndThread );
     }
+#ifdef __cpp_lib_unreachable
+    // We check the two conditions for the for loop before entering the function
+    // thus this else block is impossible to reach, we can let the compiler optimize here
+    else {
+        std::unreachable();
+    }
+#endif
 }
 
 }
